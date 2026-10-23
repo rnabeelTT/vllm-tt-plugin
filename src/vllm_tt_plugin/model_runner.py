@@ -482,6 +482,17 @@ class TTModelRunner:
         carries ``num_kv_heads // tp`` heads internally).
         """
         num_devices = self.num_devices // self.tt_data_parallel_size
+        # A REPLICATED model carries every KV head on every die -- it is not sharding
+        # attention across the submesh, it is running a whole copy per die -- so the TP
+        # division below does not apply to it. Without this the cache is allocated
+        # `num_kv_heads // num_devices` heads wide while the model writes the full set,
+        # and the mismatch surfaces far away as
+        #   "paged_fill_cache geometry mismatch: cache has 16384 elems/block
+        #    (kv_heads=1 ...) but input view is 32768 (kv_heads=2 ...)".
+        # Models opt in with `model_capabilities['kv_heads_replicated'] = True`.
+        caps = getattr(getattr(self, "model", None), "model_capabilities", None) or {}
+        if caps.get("kv_heads_replicated", False):
+            return (num_blocks, spec.num_kv_heads, spec.block_size, spec.head_size)
         num_kv_heads = spec.num_kv_heads // min(num_devices, spec.num_kv_heads)
         return (num_blocks, num_kv_heads, spec.block_size, spec.head_size)
 
