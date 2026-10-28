@@ -1640,8 +1640,11 @@ class TTPlatform(Platform):
             and vllm_config.cache_config.enable_prefix_caching
         ):
             # Recurrent-state hybrid: the KV prefix cache is usable because the
-            # model snapshots its recurrent state (prefix_state.py).
+            # model snapshots its recurrent state (prefix_state.py). Core's own
+            # Mamba "align" mode (which needs chunked MM input, off on TT) is
+            # not used: the TT model keeps its recurrent state itself.
             store_prefix_state_policy(vllm_config, prefix_state_policy)
+            _renormalize_mamba_cache_config(vllm_config)
         if vllm_config.cache_config.enable_prefix_caching:
             if not supports_prefix_caching:
                 vllm_config.cache_config.enable_prefix_caching = False
