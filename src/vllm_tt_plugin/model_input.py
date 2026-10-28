@@ -170,6 +170,10 @@ class TTModelInput:
     # ``None`` for decode.
     intermediate_prefill_mask: torch.Tensor | None = None
 
+    # Prefill only, models with ``prefix_state_cache``: per row, the recurrent
+    # state snapshot to restore and the snapshots to save (prefix_state.py).
+    prefix_state: list[dict] | None = None
+
     # Request id per forward row. A prefill build can drop rows, so forward row
     # order is not recoverable from the persistent batch; sample-time consumers
     # must resolve rows through this. ``None`` for lane builds, whose rows are

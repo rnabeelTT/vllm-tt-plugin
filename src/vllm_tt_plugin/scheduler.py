@@ -16,6 +16,7 @@ from vllm_tt_plugin.config import (
     is_tt_block_output_model,
 )
 from vllm_tt_plugin.logger import init_tt_logger
+from vllm_tt_plugin.prefix_state import install_prefix_state_index
 
 logger = init_tt_logger(__name__)
 
@@ -116,6 +117,7 @@ class TTScheduler(AsyncScheduler):
         self._pending_forced_reset_discard_counts: dict[str, int] = {}
         self._output_tokens_per_step = get_tt_output_tokens_per_step(self.vllm_config)
         self._is_block_output_model = is_tt_block_output_model(self.vllm_config)
+        self._prefix_state = install_prefix_state_index(self)
         if self._is_block_output_model:
             assert self.num_sampled_tokens_per_step == 1, (
                 "Block-output accounting requires upstream to reserve exactly "
@@ -458,7 +460,26 @@ class TTScheduler(AsyncScheduler):
         if pending_reset_discards:
             set_tt_forced_reset_discard_counts(scheduler_output, pending_reset_discards)
             self._pending_forced_reset_discard_counts = {}
+        if self._prefix_state is not None:
+            self._prefix_state.plan_step(scheduler_output, self.requests)
         return scheduler_output
+
+    def update_from_output(self, scheduler_output, model_runner_output):
+        if self._prefix_state is not None:
+            self._prefix_state.step_processed(scheduler_output)
+        return super().update_from_output(scheduler_output, model_runner_output)
+
+    def finish_requests(self, request_ids, finished_status):
+        if self._prefix_state is not None:
+            if request_ids is None:
+                ids = list(self.requests)
+            elif isinstance(request_ids, str):
+                ids = [request_ids]
+            else:
+                request_ids = ids = list(request_ids)
+            for req_id in ids:
+                self._prefix_state.unplan(req_id)
+        return super().finish_requests(request_ids, finished_status)
 
     def _schedule_prefill_only(self) -> SchedulerOutput:
         """Schedule prefill work: waiting requests and partial continuations.
@@ -555,7 +576,10 @@ class TTScheduler(AsyncScheduler):
             else []
         )
         try:
-            return super().reset_prefix_cache(reset_running_requests, reset_connector)
+            reset = super().reset_prefix_cache(reset_running_requests, reset_connector)
+            if reset and self._prefix_state is not None:
+                self._prefix_state.reset()
+            return reset
         finally:
             for request, placeholder_count in reset_candidates:
                 if (

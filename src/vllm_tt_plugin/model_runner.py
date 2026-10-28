@@ -65,6 +65,10 @@ from vllm_tt_plugin.model_input import (
     slice_tt_sampling_params,
 )
 from vllm_tt_plugin.platform import TTPlatform
+from vllm_tt_plugin.prefix_state import (
+    get_prefix_state_directives,
+    get_prefix_state_policy,
+)
 from vllm_tt_plugin.scheduler import get_tt_forced_reset_discard_counts
 from vllm_tt_plugin.structured_output import (
     has_structured_outputs,
@@ -1445,7 +1449,20 @@ class TTModelRunner:
             # state. Stateless models ignore it.
             prefill_empty_slots=prefill_empty_slots,
             intermediate_prefill_mask=intermediate_prefill_mask,
+            prefix_state=self._prefix_state_rows(scheduler_output, row_req_ids)
+            if is_prompt
+            else None,
         )
+
+    def _prefix_state_rows(self, scheduler_output, row_req_ids) -> list[dict] | None:
+        """The scheduler's recurrent-state snapshot directives in row order."""
+        if get_prefix_state_policy(self.vllm_config) is None:
+            return None
+        directives = get_prefix_state_directives(scheduler_output) or {}
+        return [
+            directives.get(req_id) or {"req_id": req_id, "restore": None, "saves": []}
+            for req_id in row_req_ids
+        ]
 
     def build_model_input(
         self,
@@ -2030,6 +2047,8 @@ class TTModelRunner:
                     empty_slots.append(dp_rank * stride + i)
         if empty_slots is not None:
             kwargs["empty_slots"] = list(empty_slots)
+        if model_input.prefix_state is not None:
+            kwargs["prefix_state"] = model_input.prefix_state
 
         if self.request_specific_rope:
             tt_out, rope_deltas = self.model.prefill_forward(**kwargs)

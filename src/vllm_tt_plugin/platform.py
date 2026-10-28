@@ -25,6 +25,10 @@ from vllm_tt_plugin.config import (
     validate_tt_lane_config,
 )
 from vllm_tt_plugin.logger import init_tt_logger
+from vllm_tt_plugin.prefix_state import (
+    PREFIX_STATE_CAPABILITY,
+    store_prefix_state_policy,
+)
 from vllm_tt_plugin.utils.dp_discovery import (
     StandardDPAssignmentT,
     run_standard_dp_visible_device_group_discovery,
@@ -1627,6 +1631,17 @@ class TTPlatform(Platform):
                 "but block-output models (output_tokens_per_step > 1) bypass "
                 "the vLLM prefix cache; fix the model's capability declaration"
             )
+        prefix_state_policy = (
+            model_capabilities.get(PREFIX_STATE_CAPABILITY) if model_capabilities else None
+        )
+        if (
+            prefix_state_policy
+            and supports_prefix_caching
+            and vllm_config.cache_config.enable_prefix_caching
+        ):
+            # Recurrent-state hybrid: the KV prefix cache is usable because the
+            # model snapshots its recurrent state (prefix_state.py).
+            store_prefix_state_policy(vllm_config, prefix_state_policy)
         if vllm_config.cache_config.enable_prefix_caching:
             if not supports_prefix_caching:
                 vllm_config.cache_config.enable_prefix_caching = False
