@@ -352,6 +352,36 @@ class TTScheduler(AsyncScheduler):
                 ", ".join(stripped),
             )
 
+    def _try_schedule_encoder_inputs(
+        self,
+        request: Request,
+        num_computed_tokens: int,
+        num_new_tokens: int,
+        encoder_compute_budget: int,
+        shift_computed_tokens: int = 0,
+    ):
+        """Never split a prompt at an image when chunked prefill is off.
+
+        When the encoder cache or the encoder budget cannot take a request's
+        image this step, the base scheduler schedules the prompt only up to
+        that image, a split prefill even with ``enable_chunked_prefill`` off.
+        A model without chunked prefill then fails on the second piece and the
+        engine dies (a burst of image requests is enough to trigger it). With
+        chunking off the request instead waits for a step with room for its
+        whole remaining prompt; the base loop stops admitting prefills for this
+        step when it sees ``num_new_tokens == 0``.
+        """
+        out = super()._try_schedule_encoder_inputs(
+            request,
+            num_computed_tokens,
+            num_new_tokens,
+            encoder_compute_budget,
+            shift_computed_tokens,
+        )
+        if not self.scheduler_config.enable_chunked_prefill and out[1] < num_new_tokens:
+            return [], 0, encoder_compute_budget, []
+        return out
+
     def _has_pending_prefill(self) -> bool:
         """Whether any request still needs prefill work.
 
