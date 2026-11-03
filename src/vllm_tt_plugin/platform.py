@@ -16,10 +16,12 @@ from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm_tt_plugin.config import (
     get_tt_config,
     get_tt_data_parallel_size,
+    get_tt_mm_prompts_whole_budget,
     get_tt_output_tokens_per_step,
     is_tt_block_output_model,
     require_tt_output_tokens_per_step,
     store_tt_lane_count,
+    store_tt_mm_prompts_whole_budget,
     store_tt_output_tokens_per_step,
     uses_tt_lane_coordinator,
     validate_tt_lane_config,
@@ -209,6 +211,23 @@ def _apply_chunked_prefill_policy(
     # rejects the flag outright when one item exceeds the token budget, so it
     # stays off for every model that does not reach here.
     scheduler_config.disable_chunked_mm_input = True
+
+    # A model whose prefill cannot resume a multimodal prompt (the text before an
+    # image may still be split from it, and a prompt may still end in a later
+    # chunk) keeps such prompts whole: the scheduler waits for a step with room
+    # for the whole prompt, and the frontend rejects one that can never fit.
+    if model_capabilities and model_capabilities.get("mm_prompts_whole"):
+        budget = int(scheduler_config.max_num_batched_tokens)
+        threshold = int(scheduler_config.long_prefill_token_threshold or 0)
+        if 0 < threshold < budget:
+            budget = threshold
+        store_tt_mm_prompts_whole_budget(vllm_config, budget)
+        logger.info(
+            "%s prefills multimodal prompts whole: a multimodal prompt waits for a "
+            "step with room for all of it (at most %d tokens).",
+            model_desc,
+            budget,
+        )
 
     # The only signal from outside the process that chunked prefill is active and
     # at what budget: the scheduler config is absent from /metrics and an
@@ -2000,6 +2019,33 @@ class TTPlatform(Platform):
         )
 
     @classmethod
+    def _validate_mm_prompt_whole(cls, processed_inputs: "EngineInput") -> None:
+        """Reject a multimodal prompt that no step can prefill whole.
+
+        On a chunked-prefill model that prefills multimodal prompts only whole
+        (``model_capabilities['mm_prompts_whole']``) such a prompt would wait
+        at the head of the queue forever."""
+        vllm_config = cls._resolve_tt_admission_handle()
+        budget = (
+            get_tt_mm_prompts_whole_budget(vllm_config)
+            if vllm_config is not None
+            else None
+        )
+        if budget is None or processed_inputs.get("type") != "multimodal":
+            return
+        if not processed_inputs.get("mm_placeholders"):
+            return
+        prompt_len = len(processed_inputs.get("prompt_token_ids") or ())
+        if prompt_len > budget:
+            raise ValueError(
+                f"This prompt with images is {prompt_len} tokens, more than the "
+                f"{budget} tokens this server prefills in one step "
+                "(--max-num-batched-tokens); the model prefills a prompt with "
+                "images in one step. Send a shorter prompt or a smaller image, "
+                "or use a server without chunked prefill."
+            )
+
+    @classmethod
     def validate_request(
         cls,
         processed_inputs: "EngineInput",
@@ -2015,6 +2061,8 @@ class TTPlatform(Platform):
 
         if isinstance(params, SamplingParams) and params.prompt_logprobs is not None:
             raise ValueError(f"Not yet supporting prompt_logprobs on {dev}")
+
+        cls._validate_mm_prompt_whole(processed_inputs)
 
         block_contract = cls._get_block_output_contract()
         if not isinstance(params, SamplingParams) or block_contract is None:

@@ -122,6 +122,27 @@ def store_tt_output_tokens_per_step(
     additional[_OUTPUT_TOKENS_PER_STEP_KEY] = output_tokens_per_step
 
 
+# A chunked-prefill model that declares model_capabilities["mm_prompts_whole"]
+# prefills a prompt carrying multimodal items only in one step (its prefill
+# cannot resume a multimodal prompt). The value is the step token budget such a
+# prompt must fit; absent = no constraint.
+_MM_PROMPTS_WHOLE_KEY = "_tt_mm_prompts_whole_budget"
+
+
+def store_tt_mm_prompts_whole_budget(vllm_config: "VllmConfig", budget: int) -> None:
+    additional = getattr(vllm_config, "additional_config", None)
+    if not isinstance(additional, dict):
+        additional = {}
+        vllm_config.additional_config = additional
+    additional[_MM_PROMPTS_WHOLE_KEY] = int(budget)
+
+
+def get_tt_mm_prompts_whole_budget(vllm_config: "VllmConfig") -> int | None:
+    additional = getattr(vllm_config, "additional_config", None) or {}
+    budget = additional.get(_MM_PROMPTS_WHOLE_KEY)
+    return int(budget) if budget is not None else None
+
+
 def get_tt_max_batch_size(vllm_config: "VllmConfig") -> int:
     """Return the global TT batch capacity for model/KV sizing.
 

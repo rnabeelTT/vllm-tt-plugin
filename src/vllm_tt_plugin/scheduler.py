@@ -12,6 +12,7 @@ from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.request import Request, RequestStatus
 
 from vllm_tt_plugin.config import (
+    get_tt_mm_prompts_whole_budget,
     get_tt_output_tokens_per_step,
     is_tt_block_output_model,
 )
@@ -117,6 +118,7 @@ class TTScheduler(AsyncScheduler):
         self._pending_forced_reset_discard_counts: dict[str, int] = {}
         self._output_tokens_per_step = get_tt_output_tokens_per_step(self.vllm_config)
         self._is_block_output_model = is_tt_block_output_model(self.vllm_config)
+        self._mm_prompts_whole_budget = get_tt_mm_prompts_whole_budget(self.vllm_config)
         self._prefix_state = install_prefix_state_index(self)
         if self._is_block_output_model:
             assert self.num_sampled_tokens_per_step == 1, (
@@ -370,6 +372,15 @@ class TTScheduler(AsyncScheduler):
         chunking off the request instead waits for a step with room for its
         whole remaining prompt; the base loop stops admitting prefills for this
         step when it sees ``num_new_tokens == 0``.
+
+        With chunking on, a model that declares
+        ``model_capabilities['mm_prompts_whole']`` gets the same rule for every
+        prompt with multimodal items: the step budget (or the encoder logic)
+        would otherwise cut it before an image or before its end, and that model
+        fails on the partial prompt. A prompt larger than the budget can never
+        be whole; the frontend rejects those (platform validate_request), and
+        one that reaches the scheduler anyway (a preempted request regrown past
+        the budget) is scheduled as before rather than parked forever.
         """
         out = super()._try_schedule_encoder_inputs(
             request,
@@ -379,6 +390,14 @@ class TTScheduler(AsyncScheduler):
             shift_computed_tokens,
         )
         if not self.scheduler_config.enable_chunked_prefill and out[1] < num_new_tokens:
+            return [], 0, encoder_compute_budget, []
+        budget = self._mm_prompts_whole_budget
+        if (
+            budget is not None
+            and num_computed_tokens < request.num_prompt_tokens
+            and num_computed_tokens + out[1] < request.num_tokens
+            and request.num_tokens - num_computed_tokens <= budget
+        ):
             return [], 0, encoder_compute_budget, []
         return out
 
