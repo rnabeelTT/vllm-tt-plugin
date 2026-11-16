@@ -201,7 +201,10 @@ class PrefixStateIndex:
                 elif snap is not None:
                     snap.pins -= 1
             saves = []
-            if not request.mm_features:
+            # a row that starts at or past the prompt end is a decode step, also when it schedules several tokens (a
+            # speculative / multi-token step fails the decode test above): the model saves no state there, so a save
+            # planned on it would be marked valid unwritten and a later hit would restore stale state
+            if not request.mm_features and start < request.num_prompt_tokens:
                 # latest first: when slots run short, the prompt-end snapshot (where a follow-up turn resumes) wins
                 for q in reversed(self._save_positions(start, end, request.num_prompt_tokens)):
                     k = self._key_at(request.block_hashes, q)
