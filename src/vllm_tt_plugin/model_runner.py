@@ -839,6 +839,11 @@ class TTModelRunner:
         multi_modal_kwargs: dict[str, Any] = {
             "pixel_values": [],
             "image_grid_thw": [],
+            # Every item of every modality, for models that take more than
+            # images (per request: None, or a list in prompt order of
+            # {"modality", "identifier", "offset", "length", "data": {field:
+            # tensor}}). Image-only models keep reading the two keys above.
+            "mm_items": [],
         }
 
         if req_indices is None:
@@ -850,6 +855,29 @@ class TTModelRunner:
             req_state = self.requests[req_id]
 
             if not req_state.mm_features:
+                multi_modal_kwargs["pixel_values"].append(None)
+                multi_modal_kwargs["image_grid_thw"].append(None)
+                multi_modal_kwargs["mm_items"].append(None)
+                continue
+
+            items: list[dict[str, Any]] = []
+            for mm_feature in req_state.mm_features:
+                pos = getattr(mm_feature, "mm_position", None)
+                data = mm_feature.data
+                items.append(
+                    {
+                        "modality": mm_feature.modality,
+                        "identifier": getattr(mm_feature, "identifier", None),
+                        "offset": int(pos.offset) if pos is not None else None,
+                        "length": int(pos.length) if pos is not None else None,
+                        "data": None
+                        if data is None
+                        else {k: v.data for k, v in data.items()},
+                    }
+                )
+            multi_modal_kwargs["mm_items"].append(items)
+            if getattr(self.model, "tt_generic_mm_items", False):
+                # the model reads mm_items only: no image-only validation
                 multi_modal_kwargs["pixel_values"].append(None)
                 multi_modal_kwargs["image_grid_thw"].append(None)
                 continue
@@ -871,6 +899,9 @@ class TTModelRunner:
             multi_modal_kwargs["pixel_values"].append(pv_array)
             multi_modal_kwargs["image_grid_thw"].append(image_grid_thw_array)
 
+        if not getattr(self.model, "tt_generic_mm_items", False):
+            # only models that opt in get the extra kwarg (prefill signatures)
+            multi_modal_kwargs.pop("mm_items")
         return multi_modal_kwargs
 
     def _sampling_params_for_padded_decode(
