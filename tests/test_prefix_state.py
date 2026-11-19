@@ -88,3 +88,31 @@ def test_prefix_state_segment_only():
     so = out({"B": 4096})
     idx.plan_step(so, {"B": b})
     assert [q for q, _ in get_prefix_state_directives(so)["B"]["saves"]] == [2048, 4096]
+
+
+def test_prefix_state_prompt_end_aligned_before_last():
+    # Inkling: one snapshot per prompt at its last chunk (2048) boundary before the last prompt token
+    pol = {"slots": 4, "segment": 0, "min_tokens": 2048, "prompt_end": True, "prompt_end_align": 2048,
+           "prompt_end_before_last": True}
+    idx = PrefixStateIndex(pol, B, B)
+    a = req("A", [("A", i) for i in range(5000 // B)], 5000, 5000)
+    so = out({"A": 5000})
+    idx.plan_step(so, {"A": a})
+    assert [q for q, _ in get_prefix_state_directives(so)["A"]["saves"]] == [4096]
+    b = req("B", [("B", i) for i in range(4097 // B)], 4097, 4097)  # last token at 4096: the boundary before it is 4096
+    so = out({"B": 4097})
+    idx.plan_step(so, {"B": b})
+    assert [q for q, _ in get_prefix_state_directives(so)["B"]["saves"]] == [4096]
+    c = req("C", [("C", i) for i in range(4096 // B)], 4096, 4096)  # last token at 4095: 2048, not 4096
+    so = out({"C": 4096})
+    idx.plan_step(so, {"C": c})
+    assert [q for q, _ in get_prefix_state_directives(so)["C"]["saves"]] == [2048]
+    d = req("D", [("D", i) for i in range(2048 // B)], 2048, 2048)  # 2047 tokens before the last: below min_tokens
+    so = out({"D": 2048})
+    idx.plan_step(so, {"D": d})
+    assert get_prefix_state_directives(so)["D"]["saves"] == []
+    try:
+        PrefixStateIndex({**pol, "prompt_end_align": 100}, B, B)
+        raise AssertionError("an alignment that is not a block multiple must be refused")
+    except ValueError:
+        pass

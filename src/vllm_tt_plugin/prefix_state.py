@@ -23,7 +23,11 @@ holds that. The model keeps a small device pool of recurrent-state snapshots
 
 A model opts in with ``model_capabilities["prefix_state_cache"] = {"slots": N,
 "segment": S, "min_tokens": M, "prompt_end": bool}``. ``prompt_end`` False saves at segment boundaries only (the
-model's prefill then runs exactly the passes it runs without caching; a hit resumes at a segment boundary). It then receives the prefill kwarg
+model's prefill then runs exactly the passes it runs without caching; a hit resumes at a segment boundary).
+``prompt_end_align`` (default: the block size) puts the prompt-end snapshot at the last multiple of it instead of the last
+block boundary (a model whose prefill chunks end there anyway saves it without an extra pass), and
+``prompt_end_before_last`` (default False) excludes the prompt's last token (a model that runs it in its first decode
+pass, not in the prefill, holds no state past it after the prefill). It then receives the prefill kwarg
 ``prefix_state``: one dict per row, ``{"req_id": str, "restore": (slot, pos) |
 None, "saves": [(pos, slot), ...]}``. ``restore`` means "load slot ``slot``
 before running from ``pos`` (== this row's start_pos)". ``saves`` means "after
@@ -66,6 +70,8 @@ def store_prefix_state_policy(vllm_config: "VllmConfig", policy: dict) -> None:
         "segment": int(policy.get("segment", 0)),
         "min_tokens": int(policy.get("min_tokens", 0)),
         "prompt_end": bool(policy.get("prompt_end", True)),
+        "prompt_end_align": int(policy.get("prompt_end_align", 0)),
+        "prompt_end_before_last": bool(policy.get("prompt_end_before_last", False)),
     }
 
 
@@ -99,6 +105,10 @@ class PrefixStateIndex:
         self.block_size = int(block_size)
         self.hash_block_size = int(hash_block_size)
         assert self.block_size % self.hash_block_size == 0
+        self.prompt_end_align = int(policy.get("prompt_end_align", 0)) or self.block_size
+        self.prompt_end_before_last = bool(policy.get("prompt_end_before_last", False))
+        if self.prompt_end_align % self.block_size:
+            raise ValueError(f"prompt_end_align {self.prompt_end_align} is not a multiple of the block size {self.block_size}")
         self._free = list(range(self.num_slots - 1, -1, -1))
         # key -> snapshot, in LRU order (most recently used last)
         self._snaps: OrderedDict[Any, _Snapshot] = OrderedDict()
@@ -171,8 +181,9 @@ class PrefixStateIndex:
         out = []
         if self.segment > 0:
             out += list(range(start + self.segment, end + 1, self.segment))
-        if self.prompt_end and end >= prompt_len:  # the chunk that finishes the prompt: its last block boundary
-            out.append(end // bs * bs)
+        if self.prompt_end and end >= prompt_len:  # the chunk that finishes the prompt: its last aligned boundary
+            last = end - 1 if self.prompt_end_before_last else end
+            out.append(last // self.prompt_end_align * self.prompt_end_align)
         return sorted({q for q in out if start < q <= end and q % bs == 0 and q >= max(self.min_tokens, bs)})
 
     def plan_step(self, scheduler_output: "SchedulerOutput", requests: dict[str, "Request"]) -> None:
