@@ -116,3 +116,26 @@ def test_prefix_state_prompt_end_aligned_before_last():
         raise AssertionError("an alignment that is not a block multiple must be refused")
     except ValueError:
         pass
+
+
+def test_prefix_state_no_saves_past_the_prompt():
+    # Inkling decode (MTP shim): after an n-token step the scheduler schedules those n emitted tokens (n <= 3) while
+    # num_tokens has already moved on, so the decode-row test alone does not catch the row. A save planned there was never written
+    # by the model (it snapshots in prefill only); the next turn restored the empty slot and the engine died
+    # (multi-turn chat whose answer crossed a 2048 boundary: 14105-token prompt, save at 14336, next turn 14435).
+    pol = {"slots": 4, "segment": 0, "min_tokens": 2048, "prompt_end": True, "prompt_end_align": 2048,
+           "prompt_end_before_last": True}
+    idx = PrefixStateIndex(pol, B, B)
+    a = req("A", [("A", i) for i in range(14400 // B)], 14105, 14105)
+    so = out({"A": 14105})
+    idx.plan_step(so, {"A": a})
+    assert [q for q, _ in get_prefix_state_directives(so)["A"]["saves"]] == [12288]
+    idx.step_processed(so)
+    for n, computed, ntok in ((3, 14200, 14203), (3, 14337, 14340), (2, 14338, 14341), (1, 14339, 14342)):
+        a.num_computed_tokens, a.num_tokens = computed, ntok  # rows [computed - n, computed): 14334..14337 straddles 14336
+        so = out({"A": n})
+        idx.plan_step(so, {"A": a})
+        d = get_prefix_state_directives(so)
+        assert d is None or (d["A"]["saves"] == [] and d["A"]["restore"] is None), (computed, d)
+        idx.step_processed(so)
+    assert idx.longest(a.block_hashes, 14336) == 12288  # nothing claims a snapshot at 14336

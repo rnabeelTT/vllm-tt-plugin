@@ -212,9 +212,13 @@ class PrefixStateIndex:
                 elif snap is not None:
                     snap.pins -= 1
             saves = []
-            if not request.mm_features:
+            # saves only inside the prompt: the model takes snapshots in its prefill. A decode row can still reach here
+            # (a multi-token step's emitted tokens are scheduled as the next row while num_tokens has moved on, e.g.
+            # the MTP shim), and a save planned on it is never written: a follow-up turn would restore an empty slot
+            if not request.mm_features and start < request.num_prompt_tokens:
                 # latest first: when slots run short, the prompt-end snapshot (where a follow-up turn resumes) wins
-                for q in reversed(self._save_positions(start, end, request.num_prompt_tokens)):
+                saves_end = min(end, request.num_prompt_tokens)
+                for q in reversed(self._save_positions(start, saves_end, request.num_prompt_tokens)):
                     k = self._key_at(request.block_hashes, q)
                     if k is None or k in self._snaps:
                         continue
