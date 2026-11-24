@@ -57,6 +57,26 @@ class TTSchedulingMode(Enum):
         raise ValueError(f"Invalid TT scheduling intent: {prefill_intent}")
 
 
+def _carry_step_bookkeeping(dropped: SchedulerOutput, kept: SchedulerOutput) -> None:
+    """Move what a discarded schedule() output handed over to the output that is sent.
+
+    Every base ``schedule()`` call drains the scheduler's finished / preempted request ids and freed encoder hashes
+    into its output (and resets them). An output that is never sent loses them for the runner: a finished request
+    then stays in the runner's request cache and per-request device state-slot map forever, and once every slot is
+    claimed a prefill fails ("no free device state slot")."""
+    kept.finished_req_ids = set(kept.finished_req_ids) | set(dropped.finished_req_ids)
+    if dropped.preempted_req_ids:
+        kept.preempted_req_ids = set(kept.preempted_req_ids or ()) | set(dropped.preempted_req_ids)
+    kept.free_encoder_mm_hashes = list(kept.free_encoder_mm_hashes) + [
+        h for h in dropped.free_encoder_mm_hashes if h not in kept.free_encoder_mm_hashes
+    ]
+    for name in ("new_block_ids_to_zero", "kv_cache_block_copies"):
+        extra = getattr(dropped, name, None)
+        if extra:
+            mine = getattr(kept, name, None)
+            setattr(kept, name, list(mine or ()) + list(extra))
+
+
 class TTScheduler(AsyncScheduler):
     """Scheduler for the TT (Tenstorrent) platform.
 
@@ -493,6 +513,7 @@ class TTScheduler(AsyncScheduler):
             # and free capacity for a later prefill admission.
             if prefill_result.total_num_scheduled_tokens == 0 and has_running_decode:
                 result = self._schedule_decode_only()
+                _carry_step_bookkeeping(prefill_result, result)
                 return self._finalize_scheduler_output(result)
             return self._finalize_scheduler_output(prefill_result)
 

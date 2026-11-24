@@ -101,6 +101,37 @@ def test_running_continuation_alone_still_schedules_prefill(monkeypatch):
     assert calls == ["prefill"]
 
 
+def test_decode_fallback_keeps_the_dropped_prefill_outputs_bookkeeping(monkeypatch):
+    # The prefill attempt that admits nothing (KV pressure) still drained the finished / preempted ids and freed
+    # encoder hashes into its output; the decode step that is sent instead must carry them, or the runner never
+    # releases those requests' state slots.
+    scheduler = _scheduler(running=[_running()], waiting=1, mode=TTSchedulingMode.DEFAULT)
+    scheduler._prefix_state = None
+
+    def empty_prefill():
+        out = SchedulerOutput.make_empty()
+        out.finished_req_ids = {"done"}
+        out.preempted_req_ids = {"bumped"}
+        out.free_encoder_mm_hashes = ["h"]
+        return out
+
+    def decode():
+        out = SchedulerOutput.make_empty()
+        out.total_num_scheduled_tokens = 1
+        out.finished_req_ids = {"later"}
+        return out
+
+    monkeypatch.setattr(scheduler, "_schedule_prefill_only", empty_prefill)
+    monkeypatch.setattr(scheduler, "_schedule_decode_only", decode)
+
+    output = scheduler.schedule()
+
+    assert output.total_num_scheduled_tokens == 1
+    assert output.finished_req_ids == {"done", "later"}
+    assert output.preempted_req_ids == {"bumped"}
+    assert output.free_encoder_mm_hashes == ["h"]
+
+
 def test_prefill_only_hides_decodes_but_keeps_continuations(monkeypatch):
     continuation = _running(is_prefill_chunk=True)
     decode = _running()
